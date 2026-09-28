@@ -1,1 +1,153 @@
+name: Build Android APK
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Unzip Ludo project
+        run: |
+          mkdir -p game
+          unzip -o ludo_multiplayer_v9_render_fixed.zip -d game
+
+      - name: Find project
+        run: |
+          PROJECT_FILE=$(find game -name project.godot -print -quit)
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ERROR: project.godot not found"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PROJECT_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project found at: $PROJECT_DIR"
+
+      - name: Prepare Android project
+        run: |
+          if grep -q '^\[rendering\]$' "$PROJECT_DIR/project.godot"; then
+            sed -i '/^\[rendering\]$/a textures/vram_compression/import_etc2_astc=true' "$PROJECT_DIR/project.godot"
+          fi
+
+      - name: Set Render WebSocket URL
+        run: |
+          if [ -f "$PROJECT_DIR/scripts/main.gd" ]; then
+            sed -i 's#ws://127.0.0.1:8080#wss://ludo-sarvar1-1.onrender.com#g' "$PROJECT_DIR/scripts/main.gd"
+          fi
+          if [ -f "$PROJECT_DIR/scripts/online_client.gd" ]; then
+            sed -i 's#ws://127.0.0.1:8080#wss://ludo-sarvar1-1.onrender.com#g' "$PROJECT_DIR/scripts/online_client.gd"
+          fi
+
+      - name: Create Android export preset
+        run: |
+          cat > "$PROJECT_DIR/export_presets.cfg" <<'EOF'
+          [preset.0]
+
+          name="Android"
+          platform="Android"
+          runnable=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path="build/LudoMultiplayer.apk"
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+
+          [preset.0.options]
+
+          custom_template/debug=""
+          custom_template/release=""
+          gradle_build/use_gradle_build=false
+          gradle_build/export_format=0
+          gradle_build/min_sdk=""
+          gradle_build/target_sdk=""
+
+          architectures/armeabi-v7a=true
+          architectures/arm64-v8a=true
+          architectures/x86=false
+          architectures/x86_64=false
+
+          version/code=1
+          version/name="1.0"
+
+          package/unique_name="com.nazimuddinyou.ludomultiplayer"
+          package/name="Ludo Multiplayer"
+          package/signed=true
+          package/classify_as_game=true
+          package/retain_data_on_uninstall=false
+          package/exclude_from_recents=false
+          package/show_in_app_library=true
+
+          graphics/opengl_debug=false
+          screen/immersive_mode=false
+          screen/support_small=true
+          screen/support_normal=true
+          screen/support_large=true
+          screen/support_xlarge=true
+
+          user_data_backup/allow=false
+          command_line/extra_args=""
+          apk_expansion/enable=false
+          permissions/custom_permissions=PackedStringArray()
+          EOF
+
+      - name: Setup Android
+        uses: android-actions/setup-android@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Create Android Keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/ludo-release.keystore" \
+            -storepass android \
+            -keypass android \
+            -alias ludo \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Ludo Multiplayer,O=Ludo,C=BD"
+
+      - name: Export APK
+        uses: firebelley/godot-export@v8.0.0
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/ludo-release.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: ludo
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: ${{ runner.temp }}/ludo-release.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: ludo
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
+        with:
+          godot_executable_download_url: https://github.com/godotengine/godot-builds/releases/download/4.5.1-stable/Godot_v4.5.1-stable_linux.x86_64.zip
+          godot_export_templates_download_url: https://github.com/godotengine/godot-builds/releases/download/4.5.1-stable/Godot_v4.5.1-stable_export_templates.tpz
+          relative_project_path: ${{ env.PROJECT_DIR }}
+          relative_export_path: ./game/build
+          presets_to_export: Android
+          cache: true
+
+      - name: Find APK
+        run: |
+          echo "=== APK FILES ==="
+          find . -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LudoMultiplayer-APK
+          path: "**/*.apk"
+          if-no-files-found: error
